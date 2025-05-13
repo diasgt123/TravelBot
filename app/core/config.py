@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     VECTOR_STORE_PATH: str = "data/vector_store"
     
     # WhatsApp Configuration
+    WHATSAPP_ACCESS_TOKEN: str = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+    WHATSAPP_PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
     WHATSAPP_WEBHOOK_SECRET: str = os.getenv("WHATSAPP_WEBHOOK_SECRET", "")
     
     # LLM Configuration

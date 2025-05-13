@@ -10,6 +10,8 @@ from langchain.prompts import PromptTemplate
 import os
 import logging
 from typing import Dict
+import re
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,22 @@ class RAGService:
         self.vector_store = self.initialize_vector_store()
         # Dictionary to store conversation memories
         self.conversation_memories: Dict[str, ConversationBufferMemory] = {}
+        
+        # Base URL for Reindeer Holidays
+        self.base_url = "https://www.reindeerholidays.com/destination"
+        
+        # Welcome messages
+        self.welcome_message = """Hi! 👋 Welcome to Reindeer Holidays 🦌
+
+Thanks for reaching out!
+We create personalized travel packages to make your trips unforgettable 🌍✈️
+Let us know your destination, travel dates, and interests — and we'll get started with the perfect plan for you!
+
+Looking forward to planning your next adventure! 😊"""
+
+        self.welcome_back_message = """Welcome back! 👋 
+
+How can I help you with your travel plans today? 🌍"""
         
     def initialize_vector_store(self):
         """Initialize or load the FAISS vector store"""
@@ -38,9 +56,9 @@ class RAGService:
             )
         except Exception as e:
             logger.info(f"No existing vector store found or error loading: {e}")
-            # Create new vector store with initial document
+            # Create new vector store with welcome message
             return FAISS.from_texts(
-                ["Welcome to the travel assistant. How can I help you today?"],
+                [self.welcome_message],
                 self.embeddings
             )
     
@@ -76,15 +94,80 @@ class RAGService:
             )
         return self.conversation_memories[session_id]
     
-    def get_response(self, query: str, session_id: str):
-        """Get response using RAG"""
+    def _is_booking_request(self, query: str) -> tuple[bool, str]:
+        """Check if the query is a booking request and extract destination"""
+        # Common booking-related phrases
+        booking_phrases = [
+            r"book.*trip.*to\s+(\w+)",
+            r"book.*holiday.*to\s+(\w+)",
+            r"book.*vacation.*to\s+(\w+)",
+            r"book.*package.*to\s+(\w+)",
+            r"want.*to.*book.*to\s+(\w+)",
+            r"need.*to.*book.*to\s+(\w+)",
+            r"looking.*to.*book.*to\s+(\w+)"
+        ]
+        
+        query = query.lower()
+        for pattern in booking_phrases:
+            match = re.search(pattern, query)
+            if match:
+                destination = match.group(1).strip()
+                return True, destination
+        return False, ""
+    
+    def _get_booking_url(self, destination: str) -> str:
+        """Generate the booking URL for a destination"""
+        # Convert destination to URL format
+        destination = destination.lower().replace(" ", "-")
+        return f"{self.base_url}/{destination}"
+    
+    def _is_first_message(self, session_id: str) -> bool:
+        """Check if this is the user's first message using Redis"""
+        if not self.redis_client:
+            return True  # If no Redis, treat as first message
+            
         try:
-            # Get or create memory for this session
+            # Check if session exists in Redis
+            session_key = f"session:{session_id}"
+            session_data = self.redis_client.get(session_key)
+            
+            if not session_data:
+                # First time user, create session
+                self.redis_client.set(session_key, json.dumps({"message_count": 1}))
+                return True
+            else:
+                # Update message count
+                data = json.loads(session_data)
+                data["message_count"] += 1
+                self.redis_client.set(session_key, json.dumps(data))
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error checking session: {e}")
+            return True  # On error, treat as first message
+    
+    def get_response(self, query: str, session_id: str):
+        """Get response using RAG or handle booking request"""
+        try:
+            # Check if it's a greeting
+            if query.lower() in ["hi", "hello", "hey", "greetings", "start"]:
+                if self._is_first_message(session_id):
+                    return self.welcome_message
+                else:
+                    return self.welcome_back_message
+            
+            # Check if it's a booking request
+            is_booking, destination = self._is_booking_request(query)
+            if is_booking:
+                booking_url = self._get_booking_url(destination)
+                return f"I'll help you book your trip to {destination.title()}. You can view and book packages here: {booking_url}"
+            
+            # If not a booking request, use RAG
             memory = self.get_memory(session_id)
             
-            # Create custom prompt template
-            template = """You are a helpful travel assistant. Use the following pieces of context to answer the user's question.
+            template = """You are a helpful travel assistant for Reindeer Holidays. Use the following pieces of context to answer the user's question.
             If you don't know the answer, just say that you don't know, don't try to make up an answer.
+            Always maintain a friendly and professional tone, and include relevant emojis where appropriate.
             
             Context: {context}
             Chat History: {chat_history}
@@ -96,7 +179,6 @@ class RAGService:
                 template=template
             )
             
-            # Create chain with custom prompt
             chain = ConversationalRetrievalChain.from_llm(
                 llm=ChatOpenAI(
                     model="gpt-4",
@@ -109,11 +191,9 @@ class RAGService:
                 verbose=True
             )
             
-            # Get response
             logger.info(f"Processing query: {query}")
             response = chain({"question": query})
             
-            # Extract just the answer from the response
             if isinstance(response, dict) and "answer" in response:
                 return response["answer"]
             elif isinstance(response, str):
